@@ -214,6 +214,34 @@ def format_datetime_ms(value: Any) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(value / 1000))
 
 
+def contest_phase(competition: dict[str, Any], now_ms: float | None = None) -> str:
+    if now_ms is None:
+        now_ms = time.time() * 1000
+
+    start = competition.get("competitionStart")
+    end = competition.get("competitionEnd")
+    if isinstance(start, (int, float)) and now_ms < start:
+        return "Upcoming"
+    if isinstance(end, (int, float)) and now_ms >= end:
+        return "Ended"
+    return "Ongoing"
+
+
+def grouped_competitions(
+    competitions: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    now_ms = time.time() * 1000
+    groups: list[tuple[str, list[dict[str, Any]]]] = [
+        ("Ongoing", []),
+        ("Upcoming", []),
+        ("Ended", []),
+    ]
+    grouped = {label: items for label, items in groups}
+    for competition in competitions:
+        grouped[contest_phase(competition, now_ms)].append(competition)
+    return [(label, items) for label, items in groups if items]
+
+
 def body_json(body: str) -> Any:
     try:
         return json.loads(body)
@@ -480,15 +508,18 @@ def load_competitions(
 
 
 def print_competitions(competitions: list[dict[str, Any]]) -> None:
-    for competition in competitions:
-        org = competition.get("organizationSlug") or ""
-        slug = competition.get("competitionSlug") or ""
-        title = competition.get("title") or "?"
-        print(f"[{org}/{slug}] {title}")
-        start = competition.get("competitionStart")
-        end = competition.get("competitionEnd")
-        if start and end:
-            print(f"  {format_datetime_ms(start)} -> {format_datetime_ms(end)}")
+    for phase, phase_competitions in grouped_competitions(competitions):
+        print(f"{phase}:")
+        for competition in phase_competitions:
+            org = competition.get("organizationSlug") or ""
+            slug = competition.get("competitionSlug") or ""
+            title = competition.get("title") or "?"
+            print(f"[{org}/{slug}] {title}")
+            start = competition.get("competitionStart")
+            end = competition.get("competitionEnd")
+            if start and end:
+                print(f"  {format_datetime_ms(start)} -> {format_datetime_ms(end)}")
+        print()
 
 
 def cmd_contests(
@@ -1265,7 +1296,10 @@ def shell_select_contest(
 def shell_select_task(token: str, ctx: dict[str, Any]) -> tuple[bool, str]:
     tasks = ctx.get("tasks") or []
     if not ctx.get("contest"):
-        return False, "No contest selected. Use 'contests' or 'contest select ...' first."
+        return (
+            False,
+            "No contest selected. Use 'contests' or 'contest select ...' first.",
+        )
     selected = None
     if token.isdigit():
         index = int(token) - 1
@@ -1311,10 +1345,14 @@ def shell_list_contests(
         all_pages=all_pages,
     )
     ctx["contests"] = contests
-    for index, contest in enumerate(contests, 1):
-        print(
-            f"{index}. [{contest.get('organizationSlug')}/{contest.get('competitionSlug')}] {contest.get('title')}"
-        )
+    contest_indexes = {id(contest): index for index, contest in enumerate(contests, 1)}
+    for phase, phase_contests in grouped_competitions(contests):
+        print(f"{phase}:")
+        for contest in phase_contests:
+            print(
+                f"{contest_indexes[id(contest)]}. [{contest.get('organizationSlug')}/{contest.get('competitionSlug')}] {contest.get('title')}"
+            )
+        print()
 
 
 def shell_list_tasks(ctx: dict[str, Any]) -> None:
