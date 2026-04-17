@@ -1,2 +1,7 @@
 competition-frontend/
 competition-backend/
+__pycache__/
+.ruff_cache/
+*.pyc
+dist/
+build/
