@@ -3,18 +3,18 @@
 Nitro AI Judge CLI.
 
 Usage:
-    python3 nitro-cli.py
-    python3 nitro-cli.py login [--username USER --password PASS]
-    python3 nitro-cli.py contests [--page N] [--page-size N] [--all-pages] [--all]
-    python3 nitro-cli.py tasks <org> <comp>
-    python3 nitro-cli.py tasks <org>/<comp>
-    python3 nitro-cli.py task <org> <comp> <task_id>
-    python3 nitro-cli.py task <org>/<comp> <task_id>
-    python3 nitro-cli.py submit <org> <comp> <task_id> --output FILE [--source FILE] [--note TEXT] [--wait]
-    python3 nitro-cli.py submissions <org> <comp> <task_id> [--author USER] [--page N] [--page-size N] [--mode MODE]
-    python3 nitro-cli.py submission <submission_id>
-    python3 nitro-cli.py set-final <submission_id>
-    python3 nitro-cli.py unset-final <submission_id>
+    nitro-cli
+    nitro-cli login [--username USER --password PASS]
+    nitro-cli contests [--page N] [--page-size N] [--all-pages] [--all]
+    nitro-cli tasks <org> <comp>
+    nitro-cli tasks <org>/<comp>
+    nitro-cli task <org> <comp> <task_id>
+    nitro-cli task <org>/<comp> <task_id>
+    nitro-cli submit <org> <comp> <task_id> --output FILE [--source FILE] [--note TEXT] [--wait]
+    nitro-cli submissions <org> <comp> <task_id> [--author USER] [--page N] [--page-size N] [--mode MODE]
+    nitro-cli submission <submission_id>
+    nitro-cli set-final <submission_id>
+    nitro-cli unset-final <submission_id>
 
 """
 
@@ -225,15 +225,28 @@ def error_preview(body: str) -> str:
     return preview[:300] if preview else ""
 
 
-def get_browser_cookies() -> tuple[str | None, str | None]:
-    output = os.popen("agent-browser cookies 2>&1").read()
+def get_saved_login_cookies() -> tuple[str | None, str | None]:
+    state = load_state() or {}
     cf = session = None
-    for line in output.splitlines():
-        if "cf_clearance=" in line:
-            cf = line.strip().split("=", 1)[1]
-        elif line.startswith("Cookie="):
-            session = line.split("=", 1)[1]
+    for cookie in state.get("cookies", []):
+        if cookie.get("name") == "cf_clearance":
+            cf = cookie.get("value")
+        elif cookie.get("name") == "Cookie":
+            session = cookie.get("value")
     return cf, session
+
+
+def get_cf_clearance(provided: str | None = None) -> str | None:
+    if provided:
+        return provided.strip() or None
+    env_value = os.environ.get("NITRO_CF_CLEARANCE", "").strip()
+    if env_value:
+        return env_value
+    saved_cf, _ = get_saved_login_cookies()
+    if saved_cf:
+        return saved_cf
+    value = input("cf_clearance: ").strip()
+    return value or None
 
 
 def save_state(
@@ -320,7 +333,9 @@ def do_login(username: str, password: str, cf: str) -> dict[str, Any]:
     return result
 
 
-def cmd_login(username: str | None, password: str | None) -> int:
+def cmd_login(
+    username: str | None, password: str | None, cf_clearance: str | None = None
+) -> int:
     if not username:
         username = input("Username: ").strip()
         if not username:
@@ -333,13 +348,12 @@ def cmd_login(username: str | None, password: str | None) -> int:
             print("Aborted.")
             return 1
 
-    cf, existing_session = get_browser_cookies()
+    cf = get_cf_clearance(cf_clearance)
     if not cf:
-        print("Failed: Could not get cf_clearance from agent-browser")
-        print(
-            "  Make sure agent-browser is running and connected to judge.nitro-ai.org"
-        )
+        print("Login failed: missing cf_clearance")
         return 1
+
+    _, existing_session = get_saved_login_cookies()
 
     if existing_session:
         if test_session(cf, existing_session):
@@ -972,9 +986,24 @@ def cmd_submission(
 
 
 def cmd_set_final(
-    cookies: tuple[str, str], bearer: str, submission_id: str, final: bool
+    cookies: tuple[str, str],
+    bearer: str,
+    submission_id: str,
+    final: bool,
+    *,
+    org: str | None = None,
+    comp: str | None = None,
+    task_id: str | None = None,
 ) -> int:
     try:
+        submission_id = resolve_submission_id(
+            submission_id,
+            cookies,
+            bearer,
+            org=org,
+            comp=comp,
+            task_id=task_id,
+        )
         set_submission_final(cookies, bearer, submission_id, final)
     except RuntimeError as e:
         print(f"Error: {e}")
@@ -988,17 +1017,28 @@ def shell_help() -> None:
         """Commands:
   help
   exit | quit
-  login [username] [password]
+  back
+  login [username] [password] [cf_clearance]
   status
+  contests
   contest list [--all] [--all-pages] [--page N] [--page-size N]
   contest select <index|org/slug>
   contest show
+  tasks
   task list
   task select <index|id>
+  select <index|id>
+  show
+  submit <output.csv> [source.py] [--note TEXT] [--wait]
   task show
   task submit <output.csv> [source.py] [--note TEXT] [--wait]
+  submissions [--mode partial|complete|both]
   task submissions list [--mode partial|complete|both]
+  submission <index|short-id|full-id>
+  submission view <index|short-id|full-id>
   task submissions show <index|short-id|full-id>
+  set-final <index|short-id|full-id>
+  unset-final <index|short-id|full-id>
 """
     )
 
@@ -1040,13 +1080,25 @@ def setup_readline(ctx: dict[str, Any]) -> None:
             "help",
             "exit",
             "quit",
+            "back",
             "login",
             "status",
+            "contests",
             "contest",
+            "tasks",
             "task",
+            "select",
+            "show",
+            "submit",
+            "submissions",
+            "submission",
+            "set-final",
+            "unset-final",
         ]
         if parts[:1] == ["contest"]:
             candidates = ["list", "select", "show"]
+        elif parts[:1] == ["submission"]:
+            candidates = ["view"]
         elif parts[:2] == ["contest", "list"]:
             candidates = ["--all", "--all-pages", "--page", "--page-size"]
         elif parts[:2] == ["contest", "select"]:
@@ -1059,10 +1111,25 @@ def setup_readline(ctx: dict[str, Any]) -> None:
             ]
         elif parts[:1] == ["task"]:
             candidates = ["list", "select", "show", "submit", "submissions"]
+        elif parts[:1] == ["select"]:
+            candidates = (
+                [str(i) for i in range(1, len(tasks) + 1)]
+                if ctx.get("contest")
+                else [str(i) for i in range(1, len(contests) + 1)]
+            )
         elif parts[:2] == ["task", "select"]:
             candidates = [
                 *[str(i) for i in range(1, len(tasks) + 1)],
                 *[str(item.get("id")) for item in tasks],
+            ]
+        elif parts[:1] == ["submit"]:
+            candidates = ["--note", "--wait"]
+        elif parts[:1] == ["submissions"]:
+            candidates = ["--mode", "partial", "complete", "both"]
+        elif parts[:1] in (["submission"], ["set-final"], ["unset-final"]):
+            candidates = [
+                *[str(i) for i in range(1, len(submissions) + 1)],
+                *[str(item.get("id", "")).split("-")[-1] for item in submissions],
             ]
         elif parts[:2] == ["task", "submit"]:
             candidates = ["--note", "--wait"]
@@ -1091,11 +1158,18 @@ def save_shell_history() -> None:
 def shell_ensure_auth() -> tuple[dict[str, Any], tuple[str, str], str] | None:
     auth_data = require_auth()
     if auth_data:
-        return auth_data
-    print("Login required.")
+        _state, cookies, _bearer = auth_data
+        if test_session(cookies[0], cookies[1]):
+            return auth_data
+        print("Saved session expired. Please log in again.")
+    else:
+        print("Login required.")
     if cmd_login(None, None) != 0:
         return None
-    return require_auth()
+    auth_data = require_auth()
+    if auth_data:
+        return auth_data
+    return None
 
 
 def shell_select_contest(
@@ -1228,13 +1302,71 @@ def shell_list_submissions(ctx: dict[str, Any], mode: str) -> None:
         )
 
 
+def shell_load_submission_items(ctx: dict[str, Any]) -> None:
+    contest = ctx.get("contest") or {}
+    task = ctx.get("task") or {}
+    if not contest or not task:
+        return
+    items, _ = load_submissions(
+        ctx["cookies"],
+        ctx["bearer"],
+        contest.get("organizationSlug"),
+        contest.get("competitionSlug"),
+        str(task.get("id")),
+        author=get_username(ctx.get("state")),
+        page=None,
+        page_size=DEFAULT_SUBMISSION_PAGE_SIZE,
+        mode="partial",
+    )
+    ctx["submission_items"] = items
+
+
 def shell_submission_id(token: str, ctx: dict[str, Any]) -> str:
+    if token.isdigit() and not (ctx.get("submission_items") or []):
+        shell_load_submission_items(ctx)
     items = ctx.get("submission_items") or []
     if token.isdigit():
         index = int(token) - 1
         if 0 <= index < len(items):
             return str(items[index].get("id"))
     return token
+
+
+def shell_show(ctx: dict[str, Any], cookies: tuple[str, str]) -> None:
+    contest = ctx.get("contest")
+    task = ctx.get("task")
+    if contest and task:
+        cmd_task(
+            cookies,
+            contest.get("organizationSlug"),
+            contest.get("competitionSlug"),
+            str(task.get("id")),
+        )
+        return
+    if contest:
+        print(
+            f"[{contest.get('organizationSlug')}/{contest.get('competitionSlug')}] {contest.get('title')}"
+        )
+        print(
+            f"{format_datetime_ms(contest.get('competitionStart'))} -> {format_datetime_ms(contest.get('competitionEnd'))}"
+        )
+        return
+    print("No contest selected")
+
+
+def shell_back(ctx: dict[str, Any]) -> None:
+    if ctx.get("task"):
+        ctx["task"] = None
+        ctx["submission_items"] = []
+        print("Returned to contest context")
+        return
+    if ctx.get("contest"):
+        ctx["contest"] = None
+        ctx["tasks"] = []
+        ctx["submission_items"] = []
+        print("Returned to top level")
+        return
+    print("Already at top level")
 
 
 def run_shell() -> int:
@@ -1274,6 +1406,9 @@ def run_shell() -> int:
             if parts[0] in {"exit", "quit"}:
                 save_shell_history()
                 return 0
+            if parts[0] == "back":
+                shell_back(ctx)
+                continue
             if parts[0] == "help":
                 shell_help()
                 continue
@@ -1294,13 +1429,17 @@ def run_shell() -> int:
             if parts[0] == "login":
                 username = parts[1] if len(parts) > 1 else None
                 password = parts[2] if len(parts) > 2 else None
-                if cmd_login(username, password) == 0:
+                cf_clearance = parts[3] if len(parts) > 3 else None
+                if cmd_login(username, password, cf_clearance) == 0:
                     auth_data = require_auth()
                     if auth_data:
                         state, cookies, bearer = auth_data
                         ctx.update(
                             {"state": state, "cookies": cookies, "bearer": bearer}
                         )
+                continue
+            if parts[0] == "contests":
+                shell_list_contests(ctx, cookies, False, page=1)
                 continue
             if parts[:2] == ["contest", "list"]:
                 page = 1
@@ -1329,17 +1468,20 @@ def run_shell() -> int:
                 ok, message = shell_select_contest(parts[2], ctx, cookies)
                 print(message)
                 continue
-            if parts[:2] == ["contest", "show"]:
-                contest = ctx.get("contest")
-                if not contest:
-                    print("No contest selected")
+            if parts[0] == "select" and len(parts) >= 2:
+                if ctx.get("contest"):
+                    ok, message = shell_select_task(parts[1], ctx)
                 else:
-                    print(
-                        f"[{contest.get('organizationSlug')}/{contest.get('competitionSlug')}] {contest.get('title')}"
-                    )
-                    print(
-                        f"{format_datetime_ms(contest.get('competitionStart'))} -> {format_datetime_ms(contest.get('competitionEnd'))}"
-                    )
+                    if not ctx.get("contests"):
+                        shell_list_contests(ctx, cookies, False, page=1)
+                    ok, message = shell_select_contest(parts[1], ctx, cookies)
+                print(message)
+                continue
+            if parts[:2] == ["contest", "show"]:
+                shell_show(ctx, cookies)
+                continue
+            if parts[0] == "tasks":
+                shell_list_tasks(ctx)
                 continue
             if parts[:2] == ["task", "list"]:
                 shell_list_tasks(ctx)
@@ -1348,19 +1490,14 @@ def run_shell() -> int:
                 ok, message = shell_select_task(parts[2], ctx)
                 print(message)
                 continue
-            if parts[:2] == ["task", "show"]:
-                contest = ctx.get("contest")
-                task = ctx.get("task")
-                if not contest or not task:
-                    print("Select a contest and task first.")
-                    continue
-                cmd_task(
-                    cookies,
-                    contest.get("organizationSlug"),
-                    contest.get("competitionSlug"),
-                    str(task.get("id")),
-                )
+            if parts[0] == "show":
+                shell_show(ctx, cookies)
                 continue
+            if parts[:2] == ["task", "show"]:
+                shell_show(ctx, cookies)
+                continue
+            if parts[0] == "submit" and len(parts) >= 2:
+                parts = ["task", "submit", *parts[1:]]
             if parts[:2] == ["task", "submit"] and len(parts) >= 3:
                 contest = ctx.get("contest")
                 task = ctx.get("task")
@@ -1391,6 +1528,14 @@ def run_shell() -> int:
                     wait,
                 )
                 continue
+            if parts[0] == "submissions":
+                mode = "both"
+                if "--mode" in parts[1:]:
+                    mode_index = parts.index("--mode")
+                    if mode_index + 1 < len(parts):
+                        mode = parts[mode_index + 1]
+                shell_list_submissions(ctx, mode)
+                continue
             if parts[:3] == ["task", "submissions", "list"]:
                 mode = "both"
                 if "--mode" in parts[3:]:
@@ -1399,6 +1544,10 @@ def run_shell() -> int:
                         mode = parts[mode_index + 1]
                 shell_list_submissions(ctx, mode)
                 continue
+            if parts[0] == "submission" and len(parts) == 2:
+                parts = ["task", "submissions", "show", parts[1]]
+            if parts[:2] == ["submission", "view"] and len(parts) >= 3:
+                parts = ["task", "submissions", "show", parts[2]]
             if parts[:3] == ["task", "submissions", "show"] and len(parts) >= 4:
                 contest = ctx.get("contest")
                 task = ctx.get("task")
@@ -1409,6 +1558,22 @@ def run_shell() -> int:
                     cookies,
                     bearer,
                     shell_submission_id(parts[3], ctx),
+                    org=contest.get("organizationSlug"),
+                    comp=contest.get("competitionSlug"),
+                    task_id=str(task.get("id")),
+                )
+                continue
+            if parts[0] in {"set-final", "unset-final"} and len(parts) >= 2:
+                contest = ctx.get("contest")
+                task = ctx.get("task")
+                if not contest or not task:
+                    print("Select a contest and task first.")
+                    continue
+                cmd_set_final(
+                    cookies,
+                    bearer,
+                    shell_submission_id(parts[1], ctx),
+                    parts[0] == "set-final",
                     org=contest.get("organizationSlug"),
                     comp=contest.get("competitionSlug"),
                     task_id=str(task.get("id")),
@@ -1426,6 +1591,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_login = sub.add_parser("login", help="Login to Nitro Judge")
     p_login.add_argument("--username")
     p_login.add_argument("--password")
+    p_login.add_argument("--cf-clearance")
 
     p_contests = sub.add_parser("contests", help="List competitions")
     p_contests.add_argument("--page", type=int, default=1)
@@ -1481,11 +1647,11 @@ def build_parser() -> argparse.ArgumentParser:
 def require_auth() -> tuple[dict[str, Any], tuple[str, str], str] | None:
     state = load_state()
     if not state:
-        print("Not logged in. Run: python3 nitro-cli.py login")
+        print("Not logged in. Run: nitro-cli login")
         return None
     auth = get_auth(state)
     if not auth:
-        print("Missing cookies. Run: python3 nitro-cli.py login")
+        print("Missing cookies. Run: nitro-cli login")
         return None
     return state, (auth[0], auth[1]), auth[2]
 
@@ -1502,7 +1668,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.cmd == "login":
-        return cmd_login(args.username, args.password)
+        return cmd_login(args.username, args.password, args.cf_clearance)
 
     auth_data = require_auth()
     if not auth_data:

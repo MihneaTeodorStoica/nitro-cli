@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nitro-cli"
+version = "0.1.0"
+description = "CLI client for judge.nitro-ai.org"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Mihnea Teodor Stoica" }
+]
+keywords = ["nitro", "cli", "judge", "competitions"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/MihneaTeodorStoica/nitro-cli"
+Repository = "https://github.com/MihneaTeodorStoica/nitro-cli"
+Issues = "https://github.com/MihneaTeodorStoica/nitro-cli/issues"
+
+[project.scripts]
+nitro-cli = "nitro_cli:main"
+
+[tool.setuptools]
+py-modules = ["nitro_cli"]
