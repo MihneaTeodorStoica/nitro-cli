@@ -177,9 +177,12 @@ Recommended release flow:
 python3 -m pip install --upgrade build twine
 python3 -m build
 python3 -m twine check dist/*
+# bump version in pyproject.toml before tagging a new release
 git tag v0.1.0
 git push origin main --tags
 ```
+
+PyPI does not allow re-uploading the same filename for an existing release. The workflow is configured to skip already-published files on reruns, but publishing a new release still requires a new version in `pyproject.toml` and a matching new tag.
 
 For PyPI trusted publishing, configure PyPI to trust this GitHub repository and the `pypi` environment.
 
