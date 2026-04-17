@@ -1064,7 +1064,7 @@ def shell_help() -> None:
         """Commands:
   help
   exit | quit
-  back
+  back | unselect
   login [username] [password]
   status
   contests
@@ -1086,6 +1086,12 @@ def shell_help() -> None:
   task submissions show <index|short-id|full-id>
   set-final <index|short-id|full-id>
   unset-final <index|short-id|full-id>
+
+Notes:
+  select is context-sensitive:
+    - at top level, it selects a contest
+    - inside a contest, it selects a task
+  back/unselect clears the current task first, then the current contest
 """
     )
 
@@ -1246,14 +1252,20 @@ def shell_select_contest(
         selected.get("competitionSlug"),
     )
     ctx["submission_items"] = []
+    task_count = len(ctx["tasks"])
     return (
         True,
-        f"Selected {selected.get('organizationSlug')}/{selected.get('competitionSlug')}",
+        "Selected "
+        f"{selected.get('organizationSlug')}/{selected.get('competitionSlug')} "
+        f"({task_count} task{'s' if task_count != 1 else ''} loaded). "
+        "Use 'tasks' to list them or 'select <task>' to choose one.",
     )
 
 
 def shell_select_task(token: str, ctx: dict[str, Any]) -> tuple[bool, str]:
     tasks = ctx.get("tasks") or []
+    if not ctx.get("contest"):
+        return False, "No contest selected. Use 'contests' or 'contest select ...' first."
     selected = None
     if token.isdigit():
         index = int(token) - 1
@@ -1270,6 +1282,12 @@ def shell_select_task(token: str, ctx: dict[str, Any]) -> tuple[bool, str]:
                 selected = task
                 break
     if not selected:
+        if token.isdigit() and ctx.get("contest"):
+            return (
+                False,
+                "Task not found. You're inside a contest, so 'select' expects a task. "
+                "Use 'tasks' to list tasks, or 'contest select ...' / 'back' to change contests.",
+            )
         return False, "Task not found"
     ctx["task"] = selected
     ctx["submission_items"] = []
@@ -1401,6 +1419,36 @@ def shell_show(ctx: dict[str, Any], cookies: tuple[str, str]) -> None:
     print("No contest selected")
 
 
+def shell_show_contest(ctx: dict[str, Any]) -> None:
+    contest = ctx.get("contest")
+    if not contest:
+        print("No contest selected")
+        return
+    print(
+        f"[{contest.get('organizationSlug')}/{contest.get('competitionSlug')}] {contest.get('title')}"
+    )
+    print(
+        f"{format_datetime_ms(contest.get('competitionStart'))} -> {format_datetime_ms(contest.get('competitionEnd'))}"
+    )
+
+
+def shell_show_task(ctx: dict[str, Any], cookies: tuple[str, str]) -> None:
+    contest = ctx.get("contest")
+    task = ctx.get("task")
+    if not contest:
+        print("No contest selected")
+        return
+    if not task:
+        print("No task selected")
+        return
+    cmd_task(
+        cookies,
+        contest.get("organizationSlug"),
+        contest.get("competitionSlug"),
+        str(task.get("id")),
+    )
+
+
 def shell_back(ctx: dict[str, Any]) -> None:
     if ctx.get("task"):
         ctx["task"] = None
@@ -1453,7 +1501,7 @@ def run_shell() -> int:
             if parts[0] in {"exit", "quit"}:
                 save_shell_history()
                 return 0
-            if parts[0] == "back":
+            if parts[0] in {"back", "unselect"}:
                 shell_back(ctx)
                 continue
             if parts[0] == "help":
@@ -1524,7 +1572,7 @@ def run_shell() -> int:
                 print(message)
                 continue
             if parts[:2] == ["contest", "show"]:
-                shell_show(ctx, cookies)
+                shell_show_contest(ctx)
                 continue
             if parts[0] == "tasks":
                 shell_list_tasks(ctx)
@@ -1540,7 +1588,7 @@ def run_shell() -> int:
                 shell_show(ctx, cookies)
                 continue
             if parts[:2] == ["task", "show"]:
-                shell_show(ctx, cookies)
+                shell_show_task(ctx, cookies)
                 continue
             if parts[0] == "submit" and len(parts) >= 2:
                 parts = ["task", "submit", *parts[1:]]

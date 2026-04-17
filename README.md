@@ -114,7 +114,7 @@ Shell commands:
 ```text
 help
 exit | quit
-back
+back | unselect
 login [username] [password]
 status
 contests
@@ -137,6 +137,11 @@ task submissions show <index|short-id|full-id>
 set-final <index|short-id|full-id>
 unset-final <index|short-id|full-id>
 ```
+
+Notes:
+
+- `select` is context-sensitive: at top level it selects a contest; inside a contest it selects a task.
+- `back` / `unselect` clears the current task first, then the current contest.
 
 ## State
 
