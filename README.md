@@ -69,7 +69,7 @@ python3 -m pip install -e .
 From PyPI:
 
 ```bash
-pipx install nitro-cli
+pipx install nitro-ai-judge-cli
 ```
 
 ## Usage
@@ -177,5 +177,8 @@ git push origin main --tags
 ```
 
 For PyPI trusted publishing, configure PyPI to trust this GitHub repository and the `pypi` environment.
+
+Package name on PyPI: `nitro-ai-judge-cli`
+Command name after install: `nitro-cli`
 
 Before publishing publicly, choose and add a license file.

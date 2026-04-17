@@ -46,7 +46,7 @@ jobs:
 
     environment:
       name: pypi
-      url: https://pypi.org/p/nitro-cli
+      url: https://pypi.org/p/nitro-ai-judge-cli
 
     steps:
       - name: Download build artifacts
