@@ -174,7 +174,7 @@ python3 -m pip install --upgrade build twine
 python3 -m build
 python3 -m twine check dist/*
 # bump version in pyproject.toml before tagging a new release
-git tag v0.1.1
+git tag v0.1.2
 git push origin main --tags
 ```
 
