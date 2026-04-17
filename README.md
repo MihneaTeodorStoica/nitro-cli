@@ -157,10 +157,6 @@ Override with:
 NITRO_STATE_DIR=/some/path nitro-cli login
 ```
 
-## Repo Notes
-
-`competition-frontend/` and `competition-backend/` are not required for the published CLI.
-
 ## Publishing
 
 This repo includes a GitHub Actions workflow at `.github/workflows/publish.yml`.
