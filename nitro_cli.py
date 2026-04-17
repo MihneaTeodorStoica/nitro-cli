@@ -28,6 +28,7 @@ import json
 import os
 import readline
 import shlex
+import subprocess
 import sys
 import time
 import urllib.error as urllib_error
@@ -236,17 +237,54 @@ def get_saved_login_cookies() -> tuple[str | None, str | None]:
     return cf, session
 
 
-def get_cf_clearance(provided: str | None = None) -> str | None:
-    if provided:
-        return provided.strip() or None
-    env_value = os.environ.get("NITRO_CF_CLEARANCE", "").strip()
-    if env_value:
-        return env_value
-    saved_cf, _ = get_saved_login_cookies()
-    if saved_cf:
-        return saved_cf
-    value = input("cf_clearance: ").strip()
-    return value or None
+def launch_playwright_browser(playwright: Any) -> Any:
+    headless = os.environ.get("NITRO_BROWSER_HEADLESS", "1") != "0"
+
+    try:
+        return playwright.chromium.launch(headless=headless)
+    except Exception as e:
+        message = str(e)
+        if (
+            "Executable doesn't exist" not in message
+            and "Please run the following command" not in message
+        ):
+            raise
+        print("Installing Playwright Chromium...")
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+        )
+        return playwright.chromium.launch(headless=headless)
+
+
+def fetch_cf_clearance(timeout: int = 180) -> str:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise RuntimeError(
+            "Playwright is not installed. Install package dependencies first."
+        ) from e
+
+    if os.environ.get("NITRO_BROWSER_HEADLESS", "1") == "0":
+        print("Opening browser to obtain Cloudflare clearance...")
+        print("If a challenge appears, complete it in the browser window.")
+
+    with sync_playwright() as playwright:
+        browser = launch_playwright_browser(playwright)
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=60000)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                for cookie in context.cookies(BASE_URL):
+                    if cookie.get("name") == "cf_clearance" and cookie.get("value"):
+                        return str(cookie["value"])
+                time.sleep(1)
+        finally:
+            browser.close()
+
+    raise RuntimeError("Timed out waiting for cf_clearance from browser session")
 
 
 def save_state(
@@ -333,9 +371,7 @@ def do_login(username: str, password: str, cf: str) -> dict[str, Any]:
     return result
 
 
-def cmd_login(
-    username: str | None, password: str | None, cf_clearance: str | None = None
-) -> int:
+def cmd_login(username: str | None, password: str | None) -> int:
     if not username:
         username = input("Username: ").strip()
         if not username:
@@ -348,12 +384,15 @@ def cmd_login(
             print("Aborted.")
             return 1
 
-    cf = get_cf_clearance(cf_clearance)
-    if not cf:
-        print("Login failed: missing cf_clearance")
-        return 1
+    saved_cf, existing_session = get_saved_login_cookies()
 
-    _, existing_session = get_saved_login_cookies()
+    cf = saved_cf
+    if not cf:
+        try:
+            cf = fetch_cf_clearance()
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            print(f"Login failed: {e}")
+            return 1
 
     if existing_session:
         if test_session(cf, existing_session):
@@ -362,6 +401,14 @@ def cmd_login(
             return 0
 
     result = do_login(username, password, cf)
+
+    if result.get("http_code") == 403:
+        try:
+            cf = fetch_cf_clearance()
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            print(f"Login failed: {e}")
+            return 1
+        result = do_login(username, password, cf)
 
     if result["success"] and result.get("session_cookie"):
         decoded = decode_session(result["session_cookie"])
@@ -1018,7 +1065,7 @@ def shell_help() -> None:
   help
   exit | quit
   back
-  login [username] [password] [cf_clearance]
+  login [username] [password]
   status
   contests
   contest list [--all] [--all-pages] [--page N] [--page-size N]
@@ -1429,8 +1476,7 @@ def run_shell() -> int:
             if parts[0] == "login":
                 username = parts[1] if len(parts) > 1 else None
                 password = parts[2] if len(parts) > 2 else None
-                cf_clearance = parts[3] if len(parts) > 3 else None
-                if cmd_login(username, password, cf_clearance) == 0:
+                if cmd_login(username, password) == 0:
                     auth_data = require_auth()
                     if auth_data:
                         state, cookies, bearer = auth_data
@@ -1591,7 +1637,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_login = sub.add_parser("login", help="Login to Nitro Judge")
     p_login.add_argument("--username")
     p_login.add_argument("--password")
-    p_login.add_argument("--cf-clearance")
 
     p_contests = sub.add_parser("contests", help="List competitions")
     p_contests.add_argument("--page", type=int, default=1)
@@ -1668,7 +1713,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.cmd == "login":
-        return cmd_login(args.username, args.password, args.cf_clearance)
+        return cmd_login(args.username, args.password)
 
     auth_data = require_auth()
     if not auth_data:

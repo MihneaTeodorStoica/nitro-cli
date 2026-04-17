@@ -4,7 +4,7 @@ CLI client for `judge.nitro-ai.org`.
 
 ## Features
 
-- login using `cf_clearance` plus Nitro credentials
+- login using Playwright plus Nitro credentials
 - list contests with page controls
 - list tasks for a contest
 - view full task statements
@@ -16,29 +16,34 @@ CLI client for `judge.nitro-ai.org`.
 ## Requirements
 
 - Python 3.10+
+- Playwright is installed as a package dependency
 
 ## Login
 
-Nitro login still requires a valid `cf_clearance` cookie for `judge.nitro-ai.org`.
+`nitro-cli login` opens a real browser session using Playwright to obtain Cloudflare clearance, then completes the Nitro login flow automatically.
 
-`nitro-cli` will use, in order:
+Behavior:
 
-1. `--cf-clearance`
-2. `NITRO_CF_CLEARANCE`
-3. the saved value from `~/.nitro-cli/state.json`
-4. an interactive prompt
+1. reuses saved session if still valid
+2. reuses saved `cf_clearance` when possible
+3. opens a browser if a fresh Cloudflare clearance is needed
+4. retries login automatically if the saved clearance expired
+
+On first use, `nitro-cli` may install the Playwright Chromium browser.
+
+Browser behavior:
+
+- headless by default, so no browser window flashes
+- to force a visible browser for debugging:
+
+```bash
+NITRO_BROWSER_HEADLESS=0 nitro-cli login
+```
 
 Example:
 
 ```bash
-nitro-cli login --username MihneaStoica --password '...' --cf-clearance '...'
-```
-
-Or:
-
-```bash
-export NITRO_CF_CLEARANCE='...'
-nitro-cli login
+nitro-cli login --username MihneaStoica --password '...'
 ```
 
 ## Installation
@@ -59,6 +64,12 @@ For local development:
 
 ```bash
 python3 -m pip install -e .
+```
+
+From PyPI:
+
+```bash
+pipx install nitro-cli
 ```
 
 ## Usage
@@ -104,7 +115,7 @@ Shell commands:
 help
 exit | quit
 back
-login [username] [password] [cf_clearance]
+login [username] [password]
 status
 contests
 contest list [--all] [--page N] [--page-size N] [--all-pages]
@@ -144,5 +155,27 @@ NITRO_STATE_DIR=/some/path nitro-cli login
 ## Repo Notes
 
 `competition-frontend/` and `competition-backend/` are not required for the published CLI.
+
+## Publishing
+
+This repo includes a GitHub Actions workflow at `.github/workflows/publish.yml`.
+
+Behavior:
+
+1. Builds the package on pushes, pull requests, and manual runs
+2. Runs `twine check` on built distributions
+3. Publishes to PyPI when you push a tag matching `v*`
+
+Recommended release flow:
+
+```bash
+python3 -m pip install --upgrade build twine
+python3 -m build
+python3 -m twine check dist/*
+git tag v0.1.0
+git push origin main --tags
+```
+
+For PyPI trusted publishing, configure PyPI to trust this GitHub repository and the `pypi` environment.
 
 Before publishing publicly, choose and add a license file.
