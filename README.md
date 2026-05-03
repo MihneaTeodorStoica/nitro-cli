@@ -4,7 +4,7 @@ CLI client for `judge.nitro-ai.org`.
 
 ## Features
 
-- login using Playwright plus Nitro credentials
+- login using Nitro's JSON API
 - list contests with page controls
 - list tasks for a contest
 - view full task statements
@@ -16,29 +16,17 @@ CLI client for `judge.nitro-ai.org`.
 ## Requirements
 
 - Python 3.10+
-- Playwright is installed as a package dependency
+- no third-party Python package dependencies
 
 ## Login
 
-`nitro-cli login` opens a real browser session using Playwright to obtain Cloudflare clearance, then completes the Nitro login flow automatically.
+`nitro-cli login` posts to Nitro's `/api/auth/login` endpoint and stores the returned access and refresh tokens.
 
 Behavior:
 
-1. reuses saved session if still valid
-2. reuses saved `cf_clearance` when possible
-3. opens a browser if a fresh Cloudflare clearance is needed
-4. retries login automatically if the saved clearance expired
-
-On first use, `nitro-cli` may install the Playwright Chromium browser.
-
-Browser behavior:
-
-- headless by default, so no browser window flashes
-- to force a visible browser for debugging:
-
-```bash
-NITRO_BROWSER_HEADLESS=0 nitro-cli login
-```
+1. saves API tokens in the local CLI state file
+2. refreshes an expired access token when a refresh token is available
+3. asks you to log in again if the saved refresh token is no longer valid
 
 Example:
 

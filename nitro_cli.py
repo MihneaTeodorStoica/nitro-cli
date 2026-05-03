@@ -28,7 +28,6 @@ import json
 import os
 import readline
 import shlex
-import subprocess
 import sys
 import time
 import urllib.error as urllib_error
@@ -38,7 +37,8 @@ import uuid
 from typing import Any
 
 BASE_URL = "https://judge.nitro-ai.org"
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+API_BASE_URL = os.environ.get("NITRO_API_BASE_URL", f"{BASE_URL}/api").rstrip("/")
+UA = "Nitro CLI/0.1"
 DEFAULT_PAGE_SIZE = 20
 DEFAULT_SUBMISSION_PAGE_SIZE = 10
 STATE_DIR = os.environ.get("NITRO_STATE_DIR", os.path.expanduser("~/.nitro-cli"))
@@ -64,9 +64,9 @@ def decode_session(session_cookie: str) -> dict[str, Any] | None:
         return None
 
 
-def get_auth(state: dict[str, Any]) -> tuple[str, str, str] | None:
+def get_auth(state: dict[str, Any]) -> tuple[str | None, str | None, str] | None:
     cf = session = None
-    access_token = ""
+    access_token = state.get("access_token") or state.get("accessToken") or ""
     for cookie in state.get("cookies", []):
         if cookie.get("name") == "cf_clearance":
             cf = cookie.get("value")
@@ -76,7 +76,7 @@ def get_auth(state: dict[str, Any]) -> tuple[str, str, str] | None:
         decoded = decode_session(session)
         if decoded:
             access_token = decoded.get("accessToken", "")
-    if not cf or not session:
+    if not access_token:
         return None
     return cf, session, access_token
 
@@ -91,8 +91,9 @@ def request(
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
     timeout: int = 30,
+    base_url: str = BASE_URL,
 ) -> tuple[int, bytes, dict[str, str]]:
-    url = f"{BASE_URL}{path}"
+    url = f"{base_url.rstrip('/')}{path}"
     if params:
         query = urllib.parse.urlencode(
             {k: v for k, v in params.items() if v is not None}
@@ -101,7 +102,7 @@ def request(
             url += f"?{query}"
 
     req_headers = {"User-Agent": UA}
-    if cookies:
+    if cookies and cookies[0] and cookies[1]:
         req_headers["Cookie"] = f"cf_clearance={cookies[0]}; Cookie={cookies[1]}"
     if bearer:
         req_headers["Authorization"] = f"Bearer {bearer}"
@@ -125,6 +126,10 @@ def request(
 def request_text(**kwargs: Any) -> tuple[int, str, dict[str, str]]:
     status, body, headers = request(**kwargs)
     return status, body.decode("utf-8", errors="replace"), headers
+
+
+def api_request_text(**kwargs: Any) -> tuple[int, str, dict[str, str]]:
+    return request_text(base_url=API_BASE_URL, **kwargs)
 
 
 def parse_singlefetch(body: str) -> dict[str, Any] | list[Any] | None:
@@ -254,146 +259,125 @@ def error_preview(body: str) -> str:
     return preview[:300] if preview else ""
 
 
-def get_saved_login_cookies() -> tuple[str | None, str | None]:
-    state = load_state() or {}
-    cf = session = None
-    for cookie in state.get("cookies", []):
-        if cookie.get("name") == "cf_clearance":
-            cf = cookie.get("value")
-        elif cookie.get("name") == "Cookie":
-            session = cookie.get("value")
-    return cf, session
-
-
-def launch_playwright_browser(playwright: Any) -> Any:
-    headless = os.environ.get("NITRO_BROWSER_HEADLESS", "1") != "0"
-
+def decode_jwt_payload(token: str) -> dict[str, Any] | None:
     try:
-        return playwright.chromium.launch(headless=headless)
-    except Exception as e:
-        message = str(e)
-        if (
-            "Executable doesn't exist" not in message
-            and "Please run the following command" not in message
-        ):
-            raise
-        print("Installing Playwright Chromium...")
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True,
-        )
-        return playwright.chromium.launch(headless=headless)
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return None
 
 
-def fetch_cf_clearance(timeout: int = 180) -> str:
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as e:
-        raise RuntimeError(
-            "Playwright is not installed. Install package dependencies first."
-        ) from e
-
-    if os.environ.get("NITRO_BROWSER_HEADLESS", "1") == "0":
-        print("Opening browser to obtain Cloudflare clearance...")
-        print("If a challenge appears, complete it in the browser window.")
-
-    with sync_playwright() as playwright:
-        browser = launch_playwright_browser(playwright)
-        context = browser.new_context()
-        page = context.new_page()
-        try:
-            page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=60000)
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                for cookie in context.cookies(BASE_URL):
-                    if cookie.get("name") == "cf_clearance" and cookie.get("value"):
-                        return str(cookie["value"])
-                time.sleep(1)
-        finally:
-            browser.close()
-
-    raise RuntimeError("Timed out waiting for cf_clearance from browser session")
+def token_is_expired(token: str, buffer_seconds: int = 60) -> bool:
+    payload = decode_jwt_payload(token) or {}
+    exp = payload.get("exp")
+    if not isinstance(exp, (int, float)):
+        return False
+    return exp - time.time() <= buffer_seconds
 
 
-def save_state(
-    cf: str,
-    session_cookie: str,
-    username: str | None = None,
-    *,
-    verbose: bool = False,
-) -> None:
-    ensure_state_dir()
-    state: dict[str, Any] = {
-        "cookies": [
-            {"name": "cf_clearance", "value": cf},
-            {"name": "Cookie", "value": session_cookie},
-        ],
-        "username": username,
-        "timestamp": time.time(),
+def normalize_tokens(
+    tokens: dict[str, Any], username: str | None = None
+) -> dict[str, Any]:
+    access_token = tokens.get("access_token") or tokens.get("accessToken") or ""
+    refresh_token = tokens.get("refresh_token") or tokens.get("refreshToken") or ""
+    access_payload = decode_jwt_payload(access_token) or {}
+    refresh_payload = decode_jwt_payload(refresh_token) or {}
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "access_token_exp": access_payload.get("exp"),
+        "refresh_token_exp": refresh_payload.get("exp"),
+        "username": tokens.get("username")
+        or username
+        or access_payload.get("username")
+        or "",
+        "role": tokens.get("role") or access_payload.get("role"),
     }
-    decoded = decode_session(session_cookie)
-    if decoded:
-        state["access_token"] = decoded.get("accessToken")
-        state["refresh_token"] = decoded.get("refreshToken")
-        state["role"] = decoded.get("role")
-        state["username"] = decoded.get("username", username)
+
+
+def save_token_state(tokens: dict[str, Any], username: str | None = None) -> None:
+    ensure_state_dir()
+    state = normalize_tokens(tokens, username)
+    state["timestamp"] = time.time()
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
-    if verbose:
-        print(f"Saved to {STATE_FILE}")
 
 
-def test_session(cf: str, session: str) -> bool:
-    status, body, _ = request_text(
-        path="/profile/personal.data", cookies=(cf, session), timeout=10
+def refresh_saved_tokens(state: dict[str, Any]) -> dict[str, Any] | None:
+    refresh_token = state.get("refresh_token") or state.get("refreshToken")
+    if not refresh_token:
+        for cookie in state.get("cookies", []):
+            if cookie.get("name") == "Cookie":
+                decoded = decode_session(cookie.get("value", "")) or {}
+                refresh_token = decoded.get("refreshToken")
+                break
+    if not refresh_token:
+        return None
+    form_data = urllib.parse.urlencode({"refreshToken": refresh_token}).encode("utf-8")
+    status, body, _ = api_request_text(
+        path="/auth/refreshToken",
+        method="POST",
+        data=form_data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=20,
     )
-    return status == 200 and ('"username"' in body or '"firstName"' in body)
+    if status != 200:
+        return None
+    parsed = body_json(body)
+    if not isinstance(parsed, dict):
+        return None
+    refreshed = normalize_tokens(parsed, state.get("username"))
+    save_token_state(refreshed, refreshed.get("username"))
+    return load_state()
+
+
+def ensure_fresh_state(state: dict[str, Any]) -> dict[str, Any] | None:
+    auth = get_auth(state)
+    access_token = auth[2] if auth else ""
+    if access_token and not token_is_expired(access_token):
+        return state
+    return refresh_saved_tokens(state)
 
 
 def hash_password(password: str) -> str:
     return base64.b64encode(hashlib.sha256(password.encode()).digest()).decode()
 
 
-def do_login(username: str, password: str, cf: str) -> dict[str, Any]:
+def do_login(username: str, password: str) -> dict[str, Any]:
     form_data = urllib.parse.urlencode(
         {"username": username, "password": hash_password(password)}
     ).encode("utf-8")
-    status, body, headers = request_text(
-        path="/login.data",
+    status, body, headers = api_request_text(
+        path="/auth/login",
         method="POST",
         data=form_data,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Cookie": f"cf_clearance={cf}",
-            "Origin": BASE_URL,
-            "Referer": f"{BASE_URL}/login",
-        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=20,
     )
 
     result: dict[str, Any] = {
         "success": False,
-        "session_cookie": None,
+        "tokens": None,
         "http_code": status,
         "error": None,
     }
 
-    set_cookie = headers.get("Set-Cookie", "")
-    for part in set_cookie.split(","):
-        for cookie in part.split(";"):
-            cookie = cookie.strip()
-            if cookie.startswith("Cookie="):
-                result["session_cookie"] = cookie.split("=", 1)[1]
-
-    if status in {200, 202} and '"redirect"' in body and '"status",302' in body:
+    parsed = body_json(body)
+    if (
+        status == 200
+        and isinstance(parsed, dict)
+        and (parsed.get("access_token") or parsed.get("accessToken"))
+    ):
         result["success"] = True
+        result["tokens"] = parsed
+        result["username"] = headers.get("x-set-username", username)
         return result
 
-    if status == 403:
-        result["error"] = "HTTP 403 -- Cloudflare challenge failed or expired"
-    elif status == 401:
-        result["error"] = "HTTP 401 -- Wrong credentials"
-    elif status == 500:
-        result["error"] = f"HTTP 500 -- Server error: {error_preview(body)}"
+    if isinstance(parsed, dict):
+        result["error"] = (
+            parsed.get("message") or parsed.get("error") or f"HTTP {status}"
+        )
     else:
         result["error"] = f"HTTP {status}: {error_preview(body)}"
     return result
@@ -412,37 +396,13 @@ def cmd_login(username: str | None, password: str | None) -> int:
             print("Aborted.")
             return 1
 
-    saved_cf, existing_session = get_saved_login_cookies()
+    result = do_login(username, password)
 
-    cf = saved_cf
-    if not cf:
-        try:
-            cf = fetch_cf_clearance()
-        except (RuntimeError, subprocess.CalledProcessError) as e:
-            print(f"Login failed: {e}")
-            return 1
-
-    if existing_session:
-        if test_session(cf, existing_session):
-            save_state(cf, existing_session)
-            print("Login OK")
-            return 0
-
-    result = do_login(username, password, cf)
-
-    if result.get("http_code") == 403:
-        try:
-            cf = fetch_cf_clearance()
-        except (RuntimeError, subprocess.CalledProcessError) as e:
-            print(f"Login failed: {e}")
-            return 1
-        result = do_login(username, password, cf)
-
-    if result["success"] and result.get("session_cookie"):
-        decoded = decode_session(result["session_cookie"])
-        save_state(cf, result["session_cookie"], (decoded or {}).get("username"))
+    if result["success"] and result.get("tokens"):
+        save_token_state(result["tokens"], result.get("username"))
+        state = load_state() or {}
         print(
-            f"Login OK | user={(decoded or {}).get('username')} | role={(decoded or {}).get('role')}"
+            f"Login OK | user={state.get('username')} | role={state.get('role')}"
         )
         return 0
 
@@ -547,6 +507,15 @@ def cmd_contests(
 def load_tasks(
     cookies: tuple[str, str], bearer: str, org: str, comp: str
 ) -> list[dict[str, Any]]:
+    status, body, _ = api_request_text(
+        path=f"/organization/{org}/competition/{comp}/tasks",
+        bearer=bearer,
+    )
+    if status == 200:
+        data = body_json(body)
+        if isinstance(data, list):
+            return data
+
     status, body, _ = request_text(
         path=f"/competitions/{org}/{comp}.data",
         cookies=cookies,
@@ -588,8 +557,21 @@ def cmd_tasks(cookies: tuple[str, str], bearer: str, org: str, comp: str) -> int
 
 
 def load_task_view(
-    cookies: tuple[str, str], org: str, comp: str, task_id: str
+    cookies: tuple[str, str], bearer: str, org: str, comp: str, task_id: str
 ) -> dict[str, Any]:
+    status, body, _ = api_request_text(
+        path=f"/organization/{org}/competition/{comp}/task/{task_id}",
+        bearer=bearer,
+    )
+    if status == 200:
+        parsed = body_json(body)
+        if isinstance(parsed, dict):
+            task = (
+                parsed.get("task") if isinstance(parsed.get("task"), dict) else parsed
+            )
+            if task:
+                return {"task": task, "loader": parsed, "root": parsed}
+
     status, body, _ = request_text(
         path=f"/competitions/{org}/{comp}/{task_id}/view.data",
         cookies=cookies,
@@ -627,9 +609,11 @@ def print_task(task_id: str, task: dict[str, Any]) -> None:
                 print(f"  [{index}] {title} -- max: {max_score}")
 
 
-def cmd_task(cookies: tuple[str, str], org: str, comp: str, task_id: str) -> int:
+def cmd_task(
+    cookies: tuple[str, str], bearer: str, org: str, comp: str, task_id: str
+) -> int:
     try:
-        payload = load_task_view(cookies, org, comp, task_id)
+        payload = load_task_view(cookies, bearer, org, comp, task_id)
     except RuntimeError as e:
         print(f"Error: {e}")
         return 1
@@ -651,9 +635,8 @@ def load_submission_metadata(
 ) -> dict[str, Any] | None:
     if not username:
         return None
-    status, body, _ = request_text(
-        path=f"/api/organization/{org}/competition/{comp}/participant/{username}/submissionMetadata",
-        cookies=cookies,
+    status, body, _ = api_request_text(
+        path=f"/organization/{org}/competition/{comp}/participant/{username}/submissionMetadata",
         bearer=bearer,
         params={"task_id": task_id},
     )
@@ -690,9 +673,8 @@ def create_submission(
         )
 
     data, boundary = build_multipart({"note": note}, files)
-    status, body, _ = request_text(
-        path=f"/api/organization/{org}/competition/{comp}/task/{task_id}/submit",
-        cookies=cookies,
+    status, body, _ = api_request_text(
+        path=f"/organization/{org}/competition/{comp}/task/{task_id}/submit",
         bearer=bearer,
         method="POST",
         data=data,
@@ -778,9 +760,8 @@ def load_submission(
 
     last_error = ""
     for mode in ("complete", "partial"):
-        status, body, _ = request_text(
-            path=f"/api/submission/{submission_id}",
-            cookies=cookies,
+        status, body, _ = api_request_text(
+            path=f"/submission/{submission_id}",
             bearer=bearer,
             params={"scoring_mode": mode},
         )
@@ -805,6 +786,57 @@ def load_submissions(
     page_size: int,
     mode: str,
 ) -> tuple[list[dict[str, Any]], int]:
+    def fetch_api_page(target_page: int) -> tuple[list[dict[str, Any]], int] | None:
+        status, body, _ = api_request_text(
+            path=f"/organization/{org}/competition/{comp}/task/{task_id}/submissions",
+            bearer=bearer,
+            params={
+                "author": author,
+                "page": target_page,
+                "page_size": page_size,
+                "scoring_mode": mode,
+            },
+        )
+        if status != 200:
+            return None
+        parsed = body_json(body)
+        if isinstance(parsed, list):
+            return parsed, 1
+        if not isinstance(parsed, dict):
+            return None
+        items = (
+            parsed.get("data")
+            or parsed.get("items")
+            or parsed.get("submissions")
+            or parsed.get(
+                "partialSubmissions" if mode == "partial" else "completeSubmissions"
+            )
+            or []
+        )
+        if isinstance(items, dict):
+            items = items.get("data") or items.get("items") or []
+        if not isinstance(items, list):
+            return None
+        last_page = int(parsed.get("lastPage") or parsed.get("last_page") or 1)
+        return items, max(last_page, 1)
+
+    if page is not None:
+        api_page = fetch_api_page(page)
+        if api_page is not None:
+            return api_page
+    else:
+        api_page = fetch_api_page(1)
+        if api_page is not None:
+            items, last_page = api_page
+            all_items = list(items)
+            for next_page in range(2, last_page + 1):
+                next_api_page = fetch_api_page(next_page)
+                if next_api_page is None:
+                    break
+                page_items, _ = next_api_page
+                all_items.extend(page_items)
+            return all_items, last_page
+
     def fetch_page(target_page: int) -> tuple[list[dict[str, Any]], int]:
         status, body, _ = request_text(
             path=f"/competitions/{org}/{comp}/{task_id}/submissions.data",
@@ -936,9 +968,8 @@ def set_submission_final(
     cookies: tuple[str, str], bearer: str, submission_id: str, final: bool
 ) -> None:
     action = "setFinal" if final else "unsetFinal"
-    status, body, _ = request_text(
-        path=f"/api/submission/{submission_id}/{action}",
-        cookies=cookies,
+    status, body, _ = api_request_text(
+        path=f"/submission/{submission_id}/{action}",
         bearer=bearer,
         method="POST",
     )
@@ -1242,10 +1273,7 @@ def save_shell_history() -> None:
 def shell_ensure_auth() -> tuple[dict[str, Any], tuple[str, str], str] | None:
     auth_data = require_auth()
     if auth_data:
-        _state, cookies, _bearer = auth_data
-        if test_session(cookies[0], cookies[1]):
-            return auth_data
-        print("Saved session expired. Please log in again.")
+        return auth_data
     else:
         print("Login required.")
     if cmd_login(None, None) != 0:
@@ -1441,6 +1469,7 @@ def shell_show(ctx: dict[str, Any], cookies: tuple[str, str]) -> None:
     if contest and task:
         cmd_task(
             cookies,
+            ctx["bearer"],
             contest.get("organizationSlug"),
             contest.get("competitionSlug"),
             str(task.get("id")),
@@ -1481,6 +1510,7 @@ def shell_show_task(ctx: dict[str, Any], cookies: tuple[str, str]) -> None:
         return
     cmd_task(
         cookies,
+        ctx["bearer"],
         contest.get("organizationSlug"),
         contest.get("competitionSlug"),
         str(task.get("id")),
@@ -1780,11 +1810,15 @@ def require_auth() -> tuple[dict[str, Any], tuple[str, str], str] | None:
     if not state:
         print("Not logged in. Run: nitro-cli login")
         return None
+    state = ensure_fresh_state(state)
+    if not state:
+        print("Saved login expired. Run: nitro-cli login")
+        return None
     auth = get_auth(state)
     if not auth:
-        print("Missing cookies. Run: nitro-cli login")
+        print("Missing access token. Run: nitro-cli login")
         return None
-    return state, (auth[0], auth[1]), auth[2]
+    return state, (auth[0] or "", auth[1] or ""), auth[2]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1830,7 +1864,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"Error: {e}")
             return 1
-        return cmd_task(cookies, org, comp, str(args.task_id))
+        return cmd_task(cookies, bearer, org, comp, str(args.task_id))
 
     if args.cmd == "submit":
         try:

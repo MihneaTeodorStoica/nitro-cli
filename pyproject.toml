@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nitro-ai-judge-cli"
-version = "0.1.4"
+version = "0.2.0"
 description = "CLI client for judge.nitro-ai.org"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["playwright>=1.49"]
+dependencies = []
 authors = [
   { name = "Mihnea Teodor Stoica" }
 ]
